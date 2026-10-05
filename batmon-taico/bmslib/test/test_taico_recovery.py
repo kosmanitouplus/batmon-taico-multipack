@@ -69,8 +69,9 @@ def test_sampler_outage_backoff_and_other_pack_progress(tmp_path):
 def test_pace_two_packs_real_serial_unplug_replug(tmp_path):
     link = tmp_path / 'battery'
     a, b, absent = [pack(n, link) for n in (1, 2, 3)]
-    for obj in (a, b, absent):
-        obj.TIMEOUT = 0.25
+    for obj in (a, b):
+        obj.TIMEOUT = 2  # includes the reader's 0.5 s recovery pause
+    absent.TIMEOUT = 0.25
     commands = []
     devices = []
 

@@ -19,7 +19,7 @@ from bmslib.sampling import BmsSampler
 
 class _FakeBms:
     name = "fake"
-    address = 'serial'  # skips the bt_diagnostics BLE scan in the error handler
+    address = 'test_fake'  # BLE backoff; serial recovery has its own tests
     is_virtual = False
     is_connected = False
     connect_time = 0

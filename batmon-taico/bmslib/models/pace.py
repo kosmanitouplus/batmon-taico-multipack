@@ -264,6 +264,7 @@ class PaceUart(BtBms):
     """PACE BMS over an RS232 / RS485 (USB-UART) adapter, ``paceic`` protocol."""
 
     # PACE serial links are 9600 8N1 (syssi docs + nkinnan default).
+    READ_ONLY = True
     BAUDRATE = 9600
     # paceic frames are ASCII-hex terminated by '\r' (0x0D) and never contain a
     # newline, so the generic readline() transport would block forever. Read one
@@ -274,7 +275,7 @@ class PaceUart(BtBms):
     VER = 0x25
     CID1 = 0x46
     ADR = 0x01       # pack address (header + payload target)
-    TIMEOUT = 16
+    TIMEOUT = 5
     _KEY = 0         # single outstanding request at a time (half-duplex)
 
     def __init__(self, address, **kwargs):
@@ -314,9 +315,16 @@ class PaceUart(BtBms):
             # Deliver every well-formed frame; the request/response contract
             # (return-code, address, cid1) is validated in _read so the error is
             # surfaced there rather than silently decoded as a reading.
+            if fields['cid2'] == CID2_OK and len(fields['info']) >= 4:
+                try:
+                    if int(fields['info'][2:4], 16) != self.pack_addr:
+                        continue
+                except ValueError:
+                    continue
             self._fetch_futures.set_result(self._KEY, fields)
 
     async def connect(self, timeout=10, **kwargs):
+        self._buffer.clear()
         await self.client.connect(timeout=timeout)
         from bmslib.wired import SerialCharStub
         # Unique notification key per pack so several PACE packs can share
@@ -327,7 +335,8 @@ class PaceUart(BtBms):
         self.UUID_TX = char  # the serial wrapper ignores the char on write
 
     async def disconnect(self):
-        await self.stop_notify(self.UUID_RX)
+        if hasattr(self, 'UUID_RX'):
+            await self.client.stop_notify(self.UUID_RX)
         await super().disconnect()
 
     async def _read(self, cid2: int) -> dict:
@@ -388,7 +397,10 @@ class PaceUart(BtBms):
         # failure there must not lose the analog reading.
         status = None
         try:
-            status = decode_status((await self._read(CID2_READ_STATUS))['info'])
+            candidate = decode_status((await self._read(CID2_READ_STATUS))['info'])
+            if candidate['pack_id'] != self.pack_addr:
+                raise ValueError('PACE status response pack mismatch')
+            status = candidate
         except Exception as exc:  # noqa: BLE001
             self.logger.warning("paceic status read failed, using analog only: %s", exc)
 

@@ -164,6 +164,8 @@ class BmsSampler:
         self.bms = bms
         self.mqtt_topic_prefix = re.sub(r'[^\w_.-/]', '_', bms.name)
         self.mqtt_client = mqtt_client
+        from bmslib.mqtt_util import register_availability
+        register_availability(mqtt_client, self.mqtt_topic_prefix)
         self.invert_current = invert_current
         self.expire_after_seconds = expire_after_seconds
         self.device_info: Optional[DeviceInfo] = None
@@ -300,12 +302,16 @@ class BmsSampler:
         return {meter.name: dict(reading=meter.get()) for meter in self.meters}
 
     async def __call__(self):
+        if getattr(self, '_serial_failures', 0) and time.time() < self._time_next_retry:
+            return None
         self._num_errors += 1
         t_now = time.time()
 
         try:
             s = await self._sample_inner()
             if s:
+                mqtt_single_out(self.mqtt_client, f'{self.mqtt_topic_prefix}/availability', 'online', retain=True)
+                self._serial_failures = 0
                 self._num_errors = 0
                 self._last_error = None
                 self._last_error_type = None
@@ -337,6 +343,19 @@ class BmsSampler:
             return None
 
         except Exception as ex:
+            if self.bms.address == 'serial':
+                self._serial_failures = getattr(self, '_serial_failures', 0) + 1
+                delay = min(2 ** min(self._serial_failures, 6), 60)
+                self._time_next_retry = time.time() + delay
+                self._last_error_type = type(ex).__name__
+                self._last_error = str(ex)
+                mqtt_single_out(self.mqtt_client, f'{self.mqtt_topic_prefix}/availability', 'offline', retain=True)
+                logger.warning('%s serial read failed: %s; retry in %ss', self.bms.name, ex, delay)
+                try:
+                    await self.bms.disconnect()
+                except Exception as close_error:
+                    logger.debug('serial disconnect: %s', close_error)
+                return None
             self._last_error_type = type(ex).__name__
             self._last_error = summarize_exc(ex) if 'summarize_exc' in globals() else str(ex)
             # Collapse the multi-page asyncio.wait_for traceback that masks the
@@ -522,7 +541,7 @@ class BmsSampler:
             self.cycle_integrator += (t_hour, sample.soc * (0.01 / 2))  # SoC 100->0 is a half cycle
             self.charge_integrator += (t_hour, sample.charge)  # Ah
 
-            if self.algorithm:
+            if self.algorithm and not getattr(bms, 'READ_ONLY', False):
                 res = self.algorithm.update(sample)
                 if res or self.bms.verbose_log:
                     # sample.switches may carry keys BatterySwitches doesn't take
@@ -550,7 +569,7 @@ class BmsSampler:
                             logger.info('%s algo set %s switch -> %s', bms.name, swk, val)
                             await self.bms.set_switch(swk, val)
 
-            if self.num_samples == 0 and sample.switches and mqtt_client:
+            if self.num_samples == 0 and sample.switches and mqtt_client and not getattr(bms, 'READ_ONLY', False):
                 logger.info("%s subscribing for %s switch change", bms.name, sample.switches)
                 subscribe_switches(mqtt_client, device_topic=self.mqtt_topic_prefix, bms=bms,
                                    switches=sample.switches.keys())
@@ -670,6 +689,7 @@ class BmsSampler:
                     mqtt_client, device_topic=self.mqtt_topic_prefix,
                     expire_after_seconds=self.expire_after_seconds,
                     sample=sample,
+                    read_only=getattr(bms, 'READ_ONLY', False),
                     num_cells=len(voltages) if voltages else 0,
                     temperatures=sample.temperatures,
                     device_info=self.device_info,

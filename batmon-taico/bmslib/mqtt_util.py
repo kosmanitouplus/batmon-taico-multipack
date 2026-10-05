@@ -68,6 +68,27 @@ def remove_equal_values(fields: dict, other: dict):
 
 
 _last_values = {}
+_discovery = {}
+AVAILABILITY_TOPIC = 'batmon_taico/availability'
+_availability_topics = set()
+
+
+def register_availability(client, device_topic):
+    topic = f'{device_topic}/availability'
+    _availability_topics.add(topic)
+    mqtt_single_out(client, topic, 'offline', retain=True)
+
+
+def mqtt_reconnected(client):
+    # Called on the network thread. Never revive stale pack readings.
+    _last_values.clear()
+    for topic in list(_availability_topics):
+        client.publish(topic, 'offline', qos=1, retain=True)
+    client.publish(AVAILABILITY_TOPIC, 'online', qos=1, retain=True)
+    for topic, payload in list(_discovery.items()):
+        client.publish(topic, payload, qos=1, retain=True)
+    subscribe_state_topics(client)
+
 _last_publish_time = 0.
 
 
@@ -184,7 +205,7 @@ def publish_cell_resistance(client, device_topic, value_mohm: float):
 def publish_hass_discovery(client, device_topic, expire_after_seconds: int, sample: BmsSample, num_cells,
                            temperatures,
                            device_info: DeviceInfo = None, set_soc=False, cell_resistance=False,
-                           pack_temp_est=False):
+                           pack_temp_est=False, read_only=False):
     discovery_msg = {}
 
     # HA discovery node_id must match [a-zA-Z0-9_-] (no slashes), so flatten
@@ -380,10 +401,21 @@ def publish_hass_discovery(client, device_topic, expire_after_seconds: int, samp
             "device": device_json,
         }
 
+    if read_only:
+        discovery_msg = {topic: data for topic, data in discovery_msg.items()
+                         if not topic.startswith('homeassistant/switch/')}
+        for data in discovery_msg.values():
+            data.pop('command_topic', None)
+
     for topic, data in discovery_msg.items():
+        # Preserve every existing unique_id and state topic.
+        data['availability_mode'] = 'all'
+        data['availability'] = [{'topic': AVAILABILITY_TOPIC},
+                                {'topic': f'{device_topic}/availability'}]
         j = json.dumps(data)
+        _discovery[topic] = j
         logger.debug('discovery msg %s: %s', topic, j)
-        mqtt_single_out(client, topic, j)
+        mqtt_single_out(client, topic, j, retain=True)
 
 
 _switch_callbacks = {}
@@ -406,6 +438,8 @@ def register_state_topic(topic: str, callback):
 
 
 def subscribe_state_topics(mqtt_client: paho.Client):
+    for topic in _switch_callbacks:
+        mqtt_client.subscribe(topic, qos=2)
     for topic in _state_callbacks:
         logger.debug("subscribe %s", topic)
         mqtt_client.subscribe(topic, qos=0)

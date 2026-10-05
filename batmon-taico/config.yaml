@@ -1,7 +1,7 @@
 name: "BatMon TAICO Multi-Pack"
 description: "BatMon with TAICO/PACE multi-pack support over one serial cable"
-url: https://github.com/fl4p/batmon-ha
-version: "2.21-taico.1"
+url: https://github.com/kosmanitouplus/batmon-taico-multipack
+version: "2.21-taico.2"
 slug: "batmon_taico"
 init: false
 host_dbus: true
@@ -49,9 +49,6 @@ hassio_api: true        # http://supervisor
 arch:
   - aarch64
   - amd64
-  - armhf
-  - armv7
-  - i386
 
 services:
   - mqtt:need
@@ -98,6 +95,7 @@ schema:
       type: str
       debug: "bool?"
       pin: "str?"
+      adapter: "str?"
       adapter: "str?"
       algorithm: "str?"
       current_calibration: "float?"

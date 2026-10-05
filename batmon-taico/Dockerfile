@@ -1,4 +1,4 @@
-ARG BUILD_FROM=ghcr.io/home-assistant/amd64-base:latest
+ARG BUILD_FROM=ghcr.io/home-assistant/amd64-base:3.22
 FROM $BUILD_FROM
 
 WORKDIR /app
@@ -7,7 +7,7 @@ WORKDIR /app
 # (alpine image)
 # RUN apk add --no-cache python3 bluez py-pip git
 
-RUN apk add python3~3.13 || apk add python3~3.12 || apk add python3
+RUN apk add --no-cache python3~3.12
 RUN apk add bluez
 #RUN apk add bluez < 5.66-r4"
 # https://pkgs.alpinelinux.org/packages?name=bluez&branch=v3.16&repo=&arch=aarch64&maintainer=
@@ -38,12 +38,12 @@ RUN if [ -z "$HTTPS_PROXY$https_proxy$HTTP_PROXY$http_proxy" ]; then \
 # create a separate venv for a specific bleak version that has a pairing agent that can pair devices with a PSK
 RUN python3 -m venv venv_bleak_pairing
 RUN venv_bleak_pairing/bin/pip3 install -r requirements.txt
-RUN venv_bleak_pairing/bin/pip3 install 'git+https://github.com/jpeters-ml/bleak@feature/windowsPairing' || true
+RUN venv_bleak_pairing/bin/pip3 install 'git+https://github.com/jpeters-ml/bleak@ed0b1c1cddf3a2f01882512745199e0f8f4dfa68' || true
 
 
 RUN python3 -m venv venv
 RUN venv/bin/pip3 install -r requirements.txt
-RUN venv/bin/pip3 install influxdb || true
+RUN venv/bin/pip3 install influxdb==5.3.2 || true
 # aiobmsble declares bleak>=3.0.2, but requirements.txt pins bleak==2.0.0 for
 # #275. A plain install silently upgraded bleak to 3.0.2 (#383), so install it
 # pinned and with --no-deps to keep the pin. aiobmsble imports no bleak-3-only
@@ -61,7 +61,7 @@ RUN venv/bin/pip3 install --no-deps 'aiobmsble==0.27.0' || true
 # addon simply runs on real bleak.
 # Pinned like bluek below: an unpinned git URL is not reproducible, and Docker
 # layer caching happily reuses a stale clone of it (measured).
-RUN venv/bin/pip3 install bumble 'git+https://github.com/fl4p/bumble-bleak@1df849c' || true
+RUN venv/bin/pip3 install bumble==0.0.223 'git+https://github.com/fl4p/bumble-bleak@1df849c' || true
 # bluek (ble_stack: bluek): bleak-compatible stack over the kernel BlueZ stack
 # via L2CAP/mgmt sockets — no D-Bus, no exclusive HCI, coexists with bluetoothd.
 # Pure-Python, no deps. Activated at runtime via PYTHONPATH (addon_main.sh), same
@@ -80,10 +80,10 @@ RUN venv/bin/pip3 install 'git+https://github.com/fl4p/bluek@a206764' || true
 # Best-effort install; if the venv build fails the addon warns and falls back
 # to bleak at runtime.
 RUN python3 -m venv venv_esphome \
- && venv_esphome/bin/pip3 install paho-mqtt==2.1.0 backoff crcmod pyserial \
+ && venv_esphome/bin/pip3 install paho-mqtt==2.1.0 backoff==2.2.1 crcmod==1.7 pyserial==3.5 \
  && venv_esphome/bin/pip3 install 'bleak==3.0.2' 'habluetooth==6.26.11' 'bleak-esphome==4.1.0' \
     'aioesphomeapi==46.3.0' 'bleak-retry-connector==4.7.0' \
- && venv_esphome/bin/pip3 install influxdb \
+ && venv_esphome/bin/pip3 install influxdb==5.3.2 \
  && venv_esphome/bin/pip3 install --no-deps 'aiobmsble==0.27.0' \
  || true
 # Pinned as one set (#401). The former `bluetooth-data-tools<1.29` pin (only

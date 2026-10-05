@@ -105,6 +105,9 @@ class _FakeFutures:
 
 
 class _FakeClient:
+    def bus_lock(self):
+        return asyncio.Lock()
+
     async def write_gatt_char(self, char, data):
         pass
 
@@ -113,6 +116,7 @@ def _bms_returning(fields):
     from bmslib.models.pace import PaceUart
     bms = PaceUart.__new__(PaceUart)
     bms.VER, bms.ADR, bms.CID1, bms._KEY, bms.TIMEOUT, bms.UUID_TX = 0x25, 0x01, 0x46, 0, 1, None
+    bms.pack_addr = 1
     bms.client = _FakeClient()
     bms._fetch_futures = _FakeFutures(fields)
     return bms
@@ -147,6 +151,7 @@ def test_current_sign_stable_when_status_unavailable():
     for last_charging, expect_sign in ((True, -1), (False, +1)):
         bms = PaceUart.__new__(PaceUart)
         bms.logger = logging.getLogger("t-pace")
+        bms.pack_addr = 1
         bms._last_charging = last_charging
         bms._last_cells = []
         bms._last_temps = []

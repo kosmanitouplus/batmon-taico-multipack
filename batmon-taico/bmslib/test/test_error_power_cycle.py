@@ -169,7 +169,14 @@ def test_wired_and_virtual_bms_never_power_cycle_bluetooth(bt_power_calls, attr,
     sampler = _make_sampler(bms=bms, bt_power_cycle_on_error=True)
 
     for _ in range(5):
-        _forced_reconnect(sampler)
+        if bms.address == 'serial':
+            async def failed():
+                raise TimeoutError('serial absent')
+            sampler._sample_inner = failed
+            sampler._time_next_retry = 0
+            assert asyncio.run(sampler()) is None
+        else:
+            _forced_reconnect(sampler)
 
     assert bt_power_calls == []
 

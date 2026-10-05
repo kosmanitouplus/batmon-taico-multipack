@@ -1,3 +1,20 @@
+# 2.21-taico.2
+
+- Preserve TAICO/PACE multi-pack selection on one shared RS232 cable.
+- Retry missing/disconnected serial ports indefinitely with per-pack 2–60 s
+  backoff; recover hot-plug and isolate silent/malformed packs.
+- Fix failed-open reference leaks and stale serial handles; retain bus arbitration
+  and validate status INFO pack identity. Bound PACE transactions to 5 s.
+- Async MQTT initial connection and reconnect, retained discovery/replay,
+  per-pack availability and global offline last will. Preserve entity IDs/topics.
+- Remove data-dependent process exits; cancel polling and release serial/MQTT
+  resources on normal shutdown, exit zero.
+- Enforce PACE monitoring-only discovery/subscriptions/algorithms.
+- Support aarch64/amd64; drop armhf/armv7/i386, replace latest base with Alpine
+  3.22/Python 3.12 and pin direct dependencies/Git pairing reference.
+- Add serial hot-plug, multi-pack, MQTT reconnect and process shutdown tests,
+  native image CI and mandatory Raspberry acceptance procedure.
+
 ## [unreleased]
 
 * Experimental `impedance_estimator` (off by default): estimates the per-cell resistance of LiFePO4 packs from sampled current and cell voltages and publishes it as a `Cell Resistance` sensor in mΩ; small packs may never draw the current steps it needs (doc/Cell Resistance.md).

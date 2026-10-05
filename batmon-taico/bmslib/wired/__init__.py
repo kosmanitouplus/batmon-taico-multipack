@@ -1,5 +1,6 @@
 import threading
 import time
+import serial
 
 from bmslib.util import get_logger
 from bmslib.wired.transport import SerialTransport, StdioTransport
@@ -91,9 +92,17 @@ class _SharedSerialPort(object):
                 data = self.t.is_open and self.t.read()
                 if data:
                     errors = 0
+                    self.rx_thread_error = None
                     self._dispatch(data)
             except Exception as e:
                 errors += 1
+                # Invalidate a dead USB descriptor immediately. All handles see
+                # disconnected; their next connect reopens the configured path.
+                self.rx_thread_error = e
+                try:
+                    self.t.close()
+                except Exception:
+                    pass
                 # Bounded retry: a transient read error (USB re-enumeration) is
                 # worth riding out, a permanent one must not spin the CPU or
                 # pretend the link is alive.
@@ -114,6 +123,11 @@ class _SharedSerialPort(object):
         the link (or just re-open the port) blocks.
         """
         self._stop.set()
+        try:
+            if self.t.ser is not None:
+                self.t.ser.cancel_read()
+        except (AttributeError, OSError):
+            pass
         t, self._rx_thread = self._rx_thread, None
         if t is not None and t.is_alive():
             t.join(timeout=2)
@@ -162,10 +176,11 @@ class _SharedSerialPort(object):
 
     def acquire(self):
         """Open the port for one more user. Idempotent while others hold it."""
+        # Count only successful opens; a missing cable must not leak users.
         with self._lock:
+            if not self.t.is_open:
+                self.t.open()
             self._open_refs += 1
-        if not self.t.is_open:
-            self.t.open()
         self.ensure_reader()
 
     def release(self):
@@ -294,8 +309,10 @@ class SerialBleakClientWrapper(object):
         # loop exists.
         import asyncio
         self.port.bind_loop(asyncio.get_running_loop())
-        if self._connected:
+        if self.is_connected:
             return
+        if self._connected:
+            await self.disconnect()
         self.port.acquire()
         self._connected = True
 
@@ -321,7 +338,11 @@ class SerialBleakClientWrapper(object):
         self._keys.discard(char)
 
     async def write_gatt_char(self, _char, data):
-        self.port.t.write(data)
+        try:
+            self.port.t.write(data)
+        except (OSError, serial.SerialException):
+            self.port.t.close()
+            raise
 
 
 class SerialServiceStub():

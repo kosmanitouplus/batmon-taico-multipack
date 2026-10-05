@@ -1,0 +1,39 @@
+name: TAICO robustness
+on:
+  push:
+    branches: [main, 'robustness/**']
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  tests:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: batmon-taico
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements.txt pytest==8.3.5 pytest-asyncio==0.26.0 numpy==2.2.6
+      - run: python -m pip install --no-deps aiobmsble==0.27.0
+      - run: python -m pytest bmslib/test -q
+      - run: python -m compileall -q main.py bmslib
+  images:
+    needs: tests
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+          - runner: ubuntu-24.04
+            arch: amd64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and verify native image
+        run: |
+          docker build --build-arg BUILD_FROM=ghcr.io/home-assistant/${{ matrix.arch }}-base:3.22 -t batmon:test batmon-taico
+          docker run --rm --entrypoint /app/venv/bin/python3 batmon:test -c 'import platform, serial, paho.mqtt.client; from bmslib.models.pace import PaceUart; print(platform.machine()); assert PaceUart.READ_ONLY'

@@ -42,22 +42,15 @@ import bmslib.mqtt_util
 from bmslib.bms import MIN_VALUE_EXPIRY
 from bmslib.group import BmsGroup, VirtualGroupBms, resolve_member_ref
 from bmslib.models import construct_bms, is_serial_device
-from bmslib.mqtt_util import mqtt_last_publish_time, mqtt_message_handler, mqtt_process_action_queue
+from bmslib.mqtt_util import mqtt_message_handler, mqtt_process_action_queue
 from bmslib.sampling import BmsSampler, fetch_loop as _fetch_loop
 from bmslib.scan import stop_all_scanners
 from bmslib.store import ConfigError, load_user_config
-from bmslib.util import get_logger, exit_process
+from bmslib.util import get_logger
 
 logger = get_logger(verbose=False)
 
-try:
-    user_config = load_user_config()
-except ConfigError as e:
-    # A broken config is the user's to fix, so print what is wrong and stop.
-    # A traceback here only buries the one line that matters (#414).
-    for line in str(e).splitlines():
-        logger.error('%s', line)
-    sys.exit(1)
+user_config = None
 
 shutdown = False
 t_last_store = 0
@@ -65,7 +58,7 @@ mqtt_configured = False
 
 
 async def fetch_loop(fn, period, max_errors, max_backoff=60):
-    # the loop itself lives in bmslib.sampling so it is testable (main.py runs asyncio.run at import)
+    # The loop implementation lives in bmslib.sampling.
     await _fetch_loop(fn, period=period, max_errors=max_errors, should_stop=lambda: shutdown,
                       max_backoff=max_backoff)
 
@@ -93,17 +86,6 @@ def bg_checks(sampler_list, timeout, t_start):
 
     now = time.time()
 
-    if timeout and mqtt_configured:
-        # compute time since last successful publish
-        pdt = now - (mqtt_last_publish_time() or t_start)
-        if pdt > timeout:
-            if mqtt_last_publish_time():
-                logger.error("Watchdog: MQTT message publish timeout (last %.0fs ago), exit", pdt)
-            else:
-                logger.error("MQTT never published a message after %.0fs, exit", timeout)
-            shutdown = True
-            return False
-
     global t_last_store
     # store persistent states (metering) every 30s
     if now - (t_last_store or t_start) > 30:
@@ -116,25 +98,13 @@ def bg_checks(sampler_list, timeout, t_start):
     return True
 
 
-def background_thread(timeout: float, sampler_list: List[BmsSampler]):
-    t_start = time.time()
-    while not shutdown:
-        if not bg_checks(sampler_list, timeout, t_start):
-            break
-        time.sleep(4)
-    logger.debug("Background thread ends. shutdown=%s", shutdown)
-    time.sleep(10)
-    logger.info("Process still alive, suicide")
-    exit_process(True, True)
-
-
 async def background_loop(timeout: float, sampler_list: List[BmsSampler]):
     global shutdown
 
     t_start = time.time()
 
     if timeout:
-        logger.debug("mqtt watchdog loop started with timeout %.1fs", timeout)
+        logger.debug("background persistence loop started")
 
     while not shutdown:
 
@@ -146,7 +116,15 @@ async def background_loop(timeout: float, sampler_list: List[BmsSampler]):
 
 
 async def main():
-    global shutdown, mqtt_configured
+    global shutdown, mqtt_configured, user_config
+    try:
+        user_config = load_user_config()
+    except ConfigError as e:
+        # A broken config is the user's to fix, so print what is wrong and stop.
+        # A traceback here only buries the one line that matters (#414).
+        for line in str(e).splitlines():
+            logger.error('%s', line)
+        sys.exit(1)
 
     pair_only = len(sys.argv) > 1 and sys.argv[1] == "pair-only"
     if pair_only:
@@ -177,35 +155,41 @@ async def main():
         except Exception as e:
             logger.warning("Error power cycling BT: %s", e)
 
-    try:
-        if len(sys.argv) > 1 and sys.argv[1] == "skip-discovery":
-            raise Exception("skip-discovery")
-        if bmslib.bt.scanner_is_proxy():
-            # every BleakScanner is the same proxy scanner here, so one scan per
-            # adapter would print the identical device list N times and read as
-            # proof that the BMS are on separate proxies (#391)
-            from bmslib.esphome_proxy import proxy_sources
-            logger.info('Scanning via esphome-proxy (proxies=%s)', proxy_sources())
-            pinned = sorted({str(dev.get('adapter')) for dev in user_config.get('devices', [])
-                             if dev.get('adapter') and not is_serial_device(dev)})
-            if pinned:
-                logger.warning('adapter=%s has no effect with ble_stack=esphome: the proxy for '
-                               'each connection is picked by signal strength, not by config',
-                               ', '.join(pinned))
-            bl_ctrls = {None}
-        else:
-            for a in bmslib.bt.bt_adapters_info():
-                logger.info('Adapter %s  %s  %s', a['name'], a['mac'], a['bus'])
-            bl_ctrls = set(bmslib.bt.bt_controllers_hci() or [None])
-            # normalize so a device referenced by controller MAC dedupes against its hciN
-            bl_ctrls |= {bmslib.bt.normalize_adapter(dev.get('adapter'))
-                         for dev in user_config.get('devices', [])
-                         if dev.get('adapter') and not is_serial_device(dev)}
-        g = asyncio.gather(*[bmslib.bt.bt_discovery(logger, timeout=5, adapter=a) for a in bl_ctrls])
-        ble_devices = (await asyncio.wait_for(g, 30))[0]
-    except Exception as e:
+    serial_only = all(is_serial_device(d) for d in user_config.get('devices', [])
+                      if not str(d.get('address', '')).startswith('#'))
+    if serial_only:
         ble_devices = []
-        logger.error('Error discovering devices: %s', e)
+        logger.info('Serial-only configuration: BLE discovery skipped')
+    else:
+        try:
+            if len(sys.argv) > 1 and sys.argv[1] == "skip-discovery":
+                raise Exception("skip-discovery")
+            if bmslib.bt.scanner_is_proxy():
+                # every BleakScanner is the same proxy scanner here, so one scan per
+                # adapter would print the identical device list N times and read as
+                # proof that the BMS are on separate proxies (#391)
+                from bmslib.esphome_proxy import proxy_sources
+                logger.info('Scanning via esphome-proxy (proxies=%s)', proxy_sources())
+                pinned = sorted({str(dev.get('adapter')) for dev in user_config.get('devices', [])
+                                 if dev.get('adapter') and not is_serial_device(dev)})
+                if pinned:
+                    logger.warning('adapter=%s has no effect with ble_stack=esphome: the proxy for '
+                                   'each connection is picked by signal strength, not by config',
+                                   ', '.join(pinned))
+                bl_ctrls = {None}
+            else:
+                for a in bmslib.bt.bt_adapters_info():
+                    logger.info('Adapter %s  %s  %s', a['name'], a['mac'], a['bus'])
+                bl_ctrls = set(bmslib.bt.bt_controllers_hci() or [None])
+                # normalize so a device referenced by controller MAC dedupes against its hciN
+                bl_ctrls |= {bmslib.bt.normalize_adapter(dev.get('adapter'))
+                             for dev in user_config.get('devices', [])
+                             if dev.get('adapter') and not is_serial_device(dev)}
+            g = asyncio.gather(*[bmslib.bt.bt_discovery(logger, timeout=5, adapter=a) for a in bl_ctrls])
+            ble_devices = (await asyncio.wait_for(g, 30))[0]
+        except Exception as e:
+            ble_devices = []
+            logger.error('Error discovering devices: %s', e)
 
     verbose_log = user_config.get('verbose_log', False)
     if verbose_log:
@@ -339,13 +323,13 @@ async def main():
             user_config.mqtt_port = user_config.get('mqtt_port', int(user_config.mqtt_broker[(port_idx + 1):]))
             user_config.mqtt_broker = user_config.mqtt_broker[:port_idx]
         mqtt_port = int(user_config.get('mqtt_port', None) or 1883)
-        logger.info('connecting mqtt %s@%s:%s', user_config.mqtt_user, user_config.mqtt_broker, mqtt_port)
+        logger.info('connecting mqtt %s@%s:%s', user_config.get("mqtt_user", ""), user_config.mqtt_broker, mqtt_port)
         # paho_monkey_patch()
         mqtt_client = paho.mqtt.client.Client(CallbackAPIVersion.VERSION2)
         mqtt_configured = True
         mqtt_client.enable_logger(logger)
         if user_config.get('mqtt_user', None):
-            mqtt_client.username_pw_set(user_config.mqtt_user, user_config.mqtt_password)
+            mqtt_client.username_pw_set(user_config.get("mqtt_user", ""), user_config.get("mqtt_password", ""))
 
         mqtt_client.on_message = mqtt_message_handler
 
@@ -362,7 +346,7 @@ async def main():
             else:
                 logger.info("mqtt connected to %s", user_config.mqtt_broker)
                 mqtt_connected.set()
-                bmslib.mqtt_util.subscribe_state_topics(client)
+                bmslib.mqtt_util.mqtt_reconnected(client)
 
         def _on_disconnect(client, userdata, flags, reason_code, properties):
             # a refused CONNACK is followed by a disconnect too; only report
@@ -375,7 +359,9 @@ async def main():
         mqtt_client.on_disconnect = _on_disconnect
 
         try:
-            mqtt_client.connect(user_config.mqtt_broker, port=mqtt_port)
+            mqtt_client.will_set(bmslib.mqtt_util.AVAILABILITY_TOPIC, 'offline', qos=1, retain=True)
+            mqtt_client.reconnect_delay_set(min_delay=2, max_delay=60)
+            mqtt_client.connect_async(user_config.mqtt_broker, port=mqtt_port)
             mqtt_client.loop_start()
             # Let the CONNACK land before the first sample is published;
             # otherwise the very first batch fails with MQTT_ERR_NO_CONN.
@@ -508,7 +494,8 @@ async def main():
                            exc_info=True)
             gui_server = None
 
-    parallel_fetch = user_config.get('concurrent_sampling', False)
+    parallel_fetch = user_config.get('concurrent_sampling', False) or any(
+        b.address == 'serial' for b in bms_list)
 
     logger.info('Fetching %d BMS + %d virtual + %d others %s, period=%.2fs, keep_alive=%s',
                 sum(not bms.is_virtual for bms in bms_list),
@@ -516,7 +503,7 @@ async def main():
                 'concurrently' if parallel_fetch else 'serially', sample_period, user_config.get('keep_alive', False))
 
     watchdog_en = user_config.get('watchdog', False)
-    max_errors = 200 if watchdog_en else 0
+    max_errors = 0  # Device/broker outages are recoverable, never process-fatal.
 
     wd_timeout = max(5 * 60., sample_period * 4) if watchdog_en else 0
     asyncio.create_task(background_loop(
@@ -524,13 +511,10 @@ async def main():
         sampler_list=sampler_list
     ))
 
-    # add another daemon thread, asyncio can dead-lock with bleak TODO bug?
-    threading.Thread(target=lambda: background_thread(wd_timeout, sampler_list), daemon=True).start()
-
     tasks = sampler_list + extra_tasks
 
     # before we start the loops connect to each bms in random order
-    tasks_shuffle = list(tasks)
+    tasks_shuffle = list(tasks) if pair_only else []
     random.shuffle(tasks_shuffle)
     for t in tasks_shuffle:
         if isinstance(t, BmsSampler) and t.bms.is_virtual:
@@ -551,12 +535,18 @@ async def main():
             # per-device loops: a dead device may back off up to 10 min without delaying the others (#405)
             loops = [asyncio.create_task(fetch_loop(fn, period=sample_period, max_errors=max_errors, max_backoff=600))
                      for fn in tasks]
-            done, pending = await asyncio.wait(loops, return_when='FIRST_COMPLETED')
+            async def wait_shutdown():
+                while not shutdown:
+                    await asyncio.sleep(0.1)
+            stopper = asyncio.create_task(wait_shutdown())
+            done, pending = await asyncio.wait(loops + [stopper], return_when='FIRST_COMPLETED')
+            stopper.cancel()
 
             logger.debug('Done= %s, Pending=%s', done, pending)
             for task in loops:
                 logger.debug('Task %s is done=%s', task, task.done())
                 task.done() or task.cancel()
+            await asyncio.gather(*loops, stopper, return_exceptions=True)
 
     else:
         async def fn():
@@ -607,6 +597,16 @@ async def main():
         except:
             pass
 
+    from bmslib.wired import _reset_shared_ports
+    _reset_shared_ports()
+    if mqtt_client is not None:
+        info = mqtt_client.publish(bmslib.mqtt_util.AVAILABILITY_TOPIC, 'offline', qos=1, retain=True)
+        try:
+            info.wait_for_publish(timeout=2)
+        except Exception:
+            pass
+        mqtt_client.disconnect()
+        mqtt_client.loop_stop()
     await stop_all_scanners()
 
     if _esphome_proxies is not None:
@@ -623,21 +623,22 @@ def on_exit(*args, **kwargs):
         sys.exit(1)
 
 
-try:
-    import atexit
+if __name__ == "__main__":
+    try:
+        import atexit
 
-    atexit.register(on_exit)
-except ImportError:
-    pass
+        atexit.register(on_exit)
+    except ImportError:
+        pass
 
-try:
-    import signal
+    try:
+        import signal
 
-    signal.signal(signal.SIGTERM, on_exit)
-    signal.signal(signal.SIGINT, on_exit)
-except ImportError:
-    pass
+        signal.signal(signal.SIGTERM, on_exit)
+        signal.signal(signal.SIGINT, on_exit)
+    except ImportError:
+        pass
 
-asyncio.run(main())
+    asyncio.run(main())
 
-sys.exit(1)
+    sys.exit(0)
